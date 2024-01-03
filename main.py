@@ -13,6 +13,9 @@ import regex as re
 import ast
 import json
 import pandas as pd
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 ############################
 # Classes
@@ -40,7 +43,11 @@ class Vocabulary:
         :param word: a string
         '''
         # TODO: add the word to the vocabulary
-        pass
+        id = len(self.index2word.values())
+        if (word not in self.index2word.values()) and (word not in self.word2index.keys()):
+            self.word2index.update({word:id})
+            self.index2word.update({id:word})
+        return id
 
     def add_sentence(self, sentence):
         '''
@@ -48,7 +55,97 @@ class Vocabulary:
         :param sentence: list of strings (words)
         '''
         # TODO add the sentence to the vocabulary, this method will call the add_word method
-        pass
+        # TODO fix the punctuation function
+        sentence = clear_punctuation(sentence).split()
+        for word in sentence:
+            self.add_word(word)
+        return sentence
+
+
+    def len_pairs(self):
+        return len(self.pairs)
+
+
+    def pair(self,index):
+        return self.pairs[index]
+
+
+    def tokenize(self):
+
+        for s1 , s2 in tqdm(self.pairs):
+            self.add_sentence(s1)
+            self.add_sentence(s2)
+        return 0
+
+    def tokenized_pair(self,index):
+        s1 ,s2= self.pair(index)
+        s1 = clear_punctuation(s1).split()
+        s2 = clear_punctuation(s2).split()
+        tokenized_question = []
+        tokenized_answer = [self.word2index["<SOS>"]]
+        for word in s1:
+            tokenized_question.append(self.word2index[word])
+        tokenized_question.append(self.word2index["<EOS>"])
+
+        for word in s2:
+            tokenized_answer.append(self.word2index[word])
+        tokenized_answer.append(self.word2index["<EOS>"])
+
+        return tokenized_question,tokenized_answer
+
+    def untokenized_pair(self,index):
+        s1, s2 = self.pair(index)
+        s1 = clear_punctuation(s1).split()
+        s2 = clear_punctuation(s2).split()
+        s1.append("<EOS>")
+        s2 = ["<SOS>"]+ s2+ ["<EOS>"]
+        return s1, s2
+
+
+    def tokenize_sentence(self,sentance):
+        sentance = clear_punctuation(sentance).split()
+        tokenized_sentence = []
+        for word in sentance:
+            tokenized_sentence.append(self.word2index[word])
+        return tokenized_sentence
+
+    def untokenize_sentence(self,array):
+
+        sentence = []
+        for id in array:
+            sentence.append(self.index2word[id])
+        return sentence
+    def len_pair(self,index):
+        pair = self.tokenized_pair(index)
+
+        return max(len(pair[0]),len(pair[1]))
+
+    def plot_freqeuncy_pairs(self,file_name):
+        x = []
+
+        for index in tqdm(range(len(self.pairs))):
+            x.append(self.len_pair(index))
+
+        plt.hist(x)
+        plt.show()
+
+        df = pd.DataFrame(x, columns=['maximum length per pair of sentences'])
+        fig = sns.displot(df,x="maximum length per pair of sentences",discrete=True)
+        fig.savefig(fname=file_name)
+
+
+    def Remove_pairs(self,max_length):
+
+        index = 0
+        for _ in tqdm(range(len(len(self.pairs)))):
+            if self.len_pair(index)>max_length:
+                self.pairs.pop(index)
+            else:
+                index=+1
+
+
+
+
 
 
 def clear_punctuation(s):
@@ -59,6 +156,7 @@ def clear_punctuation(s):
     '''
     re.sub(r"[^a-zA-Z.!?]+", r" ", s)  # Remove all the character that are not letters, puntuation or numbers
     # Insert a blank between any letter and !?. using regex
+
     s = re.sub(r"([a-zA-Z])([!?.])", r"\1 \2", s)
     return s
 
@@ -181,8 +279,12 @@ class Corpus:
     def add_convo(self,convo):
         self.convo.append(convo)
 
+    #how many conversations are in this class
     def len_convo(self):
         return len(self.convo)
+
+    def len_corpus(self):
+        return len(self.corpus)
 
     def get_convo(self,i):
         return [self.corpus[sentance] for sentance in self.convo[i]]
@@ -230,11 +332,20 @@ def inspect_files():
         corpus.add_sentance(x[0],x[-1])
 
 
-
-
-
-
     return corpus
+
+
+def create_list_pairs(corpus:Corpus):
+    #input:corpus
+    #return: list of pairs
+
+    list_pairs = []
+
+    for i in range(corpus.len_convo()):
+        for pair in corpus.get_pair(i):
+            list_pairs.append(pair)
+
+    return list_pairs
 
 
 if __name__ == "__main__":
@@ -245,12 +356,24 @@ if __name__ == "__main__":
     # Download the data
     corpus = Corpus()
     corpus = inspect_files()
-    print(corpus.get_convo(77))
-    print(corpus.get_pair(77))# Create the pairs
+
+    # Create the pairs
+
+    vocab = Vocabulary(name="eng",pairs=create_list_pairs(corpus))
 
     # Tokenize the data
 
+    vocab.tokenize()
+    print(vocab.pair(0))
+    print(vocab.untokenized_pair(0))
+    print(vocab.tokenized_pair(0))
+    print(vocab.tokenize_sentence("hey there!"))
     # Filter out the sentences that are too long
+    vocab.plot_freqeuncy_pairs(file_name = "before_change.png")
+    vocab.Remove_pairs(20)
+    vocab.plot_freqeuncy_pairs(file_name = "after_change.png")
+    # TODO fix the error
+    # TODO save everything
 
     # Filter out the words that are too rare
 
