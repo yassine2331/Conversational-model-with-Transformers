@@ -16,6 +16,7 @@ import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pickle
 
 ############################
 # Classes
@@ -36,7 +37,7 @@ class Vocabulary:
         self.word2index = {"<PAD>": 0, "<SOS>": 1, "<EOS>": 2}
         self.index2word = {0: "<PAD>", 1: "<SOS>", 2: "<EOS>"}
         self.pairs = pairs
-
+        self.word_count = {}
     def add_word(self, word):
         '''
         Add a word to the vocabulary
@@ -47,6 +48,10 @@ class Vocabulary:
         if (word not in self.index2word.values()) and (word not in self.word2index.keys()):
             self.word2index.update({word:id})
             self.index2word.update({id:word})
+        if word in self.word_count.keys():
+            self.word_count[word] += 1
+        else:
+            self.word_count.update({word: 1})
         return id
 
     def add_sentence(self, sentence):
@@ -137,11 +142,30 @@ class Vocabulary:
     def Remove_pairs(self,max_length):
 
         index = 0
-        for _ in tqdm(range(len(len(self.pairs)))):
+        for _ in tqdm(range(len(self.pairs))):
             if self.len_pair(index)>max_length:
                 self.pairs.pop(index)
+
             else:
-                index=+1
+                index+=1
+
+
+    def Count_words(self):
+
+        for pair in  tqdm(self.pairs,desc="counting words"):
+            pair1 = clear_punctuation(pair[0]).split()
+            pair2 = clear_punctuation(pair[1]).split()
+            for word in pair1:
+                if word in self.word_count.keys():
+                    self.word_count[word] +=1
+                else:
+                    self.word_count.update({word,1})
+            for word in pair2:
+                if word in self.word_count.keys():
+                    self.word_count[word] +=1
+                else:
+                    self.word_count.update({word,1})
+
 
 
 
@@ -154,11 +178,13 @@ def clear_punctuation(s):
     :param s: a string
     :return: the "cleaned" string
     '''
-    re.sub(r"[^a-zA-Z.!?]+", r" ", s)  # Remove all the character that are not letters, puntuation or numbers
+    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)  # Remove all the character that are not letters, puntuation or numbers
     # Insert a blank between any letter and !?. using regex
 
     s = re.sub(r"([a-zA-Z])([!?.])", r"\1 \2", s)
-    return s
+    s = re.sub(r"([!?.])([a-zA-Z])", r"\1 \2", s)
+
+    return s.lower()
 
 
 # Dataset class
@@ -348,6 +374,36 @@ def create_list_pairs(corpus:Corpus):
     return list_pairs
 
 
+
+
+
+def save_data(array):
+
+    with open('data.pkl', 'wb') as f:
+        pickle.dump(array, f)
+    return 0
+
+
+def load_data():
+    with open('data.pkl', 'rb') as f:
+        array = pickle.load(f)
+    return array
+
+
+def plot_frequency(array,file_name):
+    array.sort()
+    print(array)
+    plt.hist(array[:40000])
+    plt.show()
+    """
+    print(array)
+    df = pd.DataFrame(array, columns=['words count'])
+    fig = sns.displot(df, x="words count", discrete=True)
+    fig.savefig(fname=file_name)
+    """
+    return 0
+
+
 if __name__ == "__main__":
     # !!! Don't change the seed !!!
     torch.manual_seed(42)
@@ -362,20 +418,29 @@ if __name__ == "__main__":
     vocab = Vocabulary(name="eng",pairs=create_list_pairs(corpus))
 
     # Tokenize the data
+    vocab = load_data()
 
-    vocab.tokenize()
+    #vocab.tokenize()   # For now
+    """
     print(vocab.pair(0))
     print(vocab.untokenized_pair(0))
     print(vocab.tokenized_pair(0))
     print(vocab.tokenize_sentence("hey there!"))
+
+
+
     # Filter out the sentences that are too long
     vocab.plot_freqeuncy_pairs(file_name = "before_change.png")
     vocab.Remove_pairs(20)
     vocab.plot_freqeuncy_pairs(file_name = "after_change.png")
-    # TODO fix the error
-    # TODO save everything
+    print(len(vocab.pairs))
 
+    #save_data(vocab)
     # Filter out the words that are too rare
+    """
+    #print(vocab.word_count.values())
+    plot_frequency(list(vocab.word_count.values()), "word_count.png")
+    print(vocab.word_count)
 
     # SAVE and put the code above into a function that you will call if you need to generate something slightly different
 
