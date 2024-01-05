@@ -38,6 +38,7 @@ class Vocabulary:
         self.index2word = {0: "<PAD>", 1: "<SOS>", 2: "<EOS>"}
         self.pairs = pairs
         self.word_count = {}
+        self.tokenized_pairs= []
     def add_word(self, word):
         '''
         Add a word to the vocabulary
@@ -61,7 +62,7 @@ class Vocabulary:
         '''
         # TODO add the sentence to the vocabulary, this method will call the add_word method
         # TODO fix the punctuation function
-        sentence = clear_punctuation(sentence).split()
+
         for word in sentence:
             self.add_word(word)
         return sentence
@@ -78,8 +79,11 @@ class Vocabulary:
     def tokenize(self):
 
         for s1 , s2 in tqdm(self.pairs):
+            s1 = clear_punctuation(s1).split()
+            s2 = clear_punctuation(s2).split()
             self.add_sentence(s1)
             self.add_sentence(s2)
+            self.tokenized_pairs.append((s1+["<EOS>"],["<SOS>"]+s2+["<EOS>"]))
         return 0
 
     def tokenized_pair(self,index):
@@ -148,6 +152,27 @@ class Vocabulary:
 
             else:
                 index+=1
+
+
+
+    def remove_word(self,word):
+
+
+        removal_indices = set()
+        for index, (p1, p2) in enumerate(self.tokenized_pairs):
+            if word in p1 or word in p2:
+                removal_indices.add(index)
+
+        # Remove all marked pairs in a single operation
+        self.pairs = [pair for i, pair in enumerate(self.pairs) if i not in removal_indices]
+        #self.tokenized_pairs= [pair for i, pair in enumerate(self.tokenized_pairs) if i not in removal_indices]
+    def remove_pairs_word(self,min_freq):
+
+        low_freq_words = {word for word, count in self.word_count.items() if count <= min_freq}
+
+        for word in tqdm(low_freq_words):
+            self.remove_word(word)
+
 
 
     def Count_words(self):
@@ -392,7 +417,7 @@ def load_data():
 
 def plot_frequency(array,file_name):
     array.sort()
-    print(array)
+
     plt.hist(array[:40000])
     plt.show()
     """
@@ -419,9 +444,9 @@ if __name__ == "__main__":
 
     # Tokenize the data
     vocab = load_data()
-
-    #vocab.tokenize()   # For now
     """
+    vocab.tokenize()   # For now
+
     print(vocab.pair(0))
     print(vocab.untokenized_pair(0))
     print(vocab.tokenized_pair(0))
@@ -435,13 +460,15 @@ if __name__ == "__main__":
     vocab.plot_freqeuncy_pairs(file_name = "after_change.png")
     print(len(vocab.pairs))
 
-    #save_data(vocab)
+    save_data(vocab)
     # Filter out the words that are too rare
     """
     #print(vocab.word_count.values())
     plot_frequency(list(vocab.word_count.values()), "word_count.png")
-    print(vocab.word_count)
-
+    print(len(vocab.pairs))
+    vocab.remove_pairs_word(5)
+    print(len(vocab.pairs))
+    save_data(vocab)
     # SAVE and put the code above into a function that you will call if you need to generate something slightly different
 
     # Training loop (Consider writing a function for this/two separate functions for training and validation)
