@@ -13,6 +13,7 @@ import regex as re
 import ast
 import json
 import pandas as pd
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -78,7 +79,7 @@ class Vocabulary:
 
     def tokenize(self):
 
-        for s1 , s2 in tqdm(self.pairs):
+        for s1 , s2 in tqdm(self.pairs,desc="tokenize"):
             s1 = clear_punctuation(s1).split()
             s2 = clear_punctuation(s2).split()
             self.add_sentence(s1)
@@ -115,8 +116,12 @@ class Vocabulary:
         sentance = clear_punctuation(sentance).split()
         tokenized_sentence = []
         for word in sentance:
-            tokenized_sentence.append(self.word2index[word])
-        return tokenized_sentence
+            if word in self.word2index.keys():
+                tokenized_sentence.append(self.word2index[word])
+            else:
+                tokenized_sentence.append(self.word2index["<PAD>"])
+
+        return tokenized_sentence + [self.word2index["<EOS>"]]
 
     def untokenize_sentence(self,array):
 
@@ -146,7 +151,7 @@ class Vocabulary:
     def Remove_pairs(self,max_length):
 
         index = 0
-        for _ in tqdm(range(len(self.pairs))):
+        for _ in tqdm(range(len(self.pairs)),desc="remove pairs iwth max len"):
             if self.len_pair(index)>max_length:
                 self.pairs.pop(index)
 
@@ -158,20 +163,34 @@ class Vocabulary:
     def remove_word(self,word):
 
 
-        removal_indices = set()
+        removal_indices = dict()
         for index, (p1, p2) in enumerate(self.tokenized_pairs):
             if word in p1 or word in p2:
-                removal_indices.add(index)
+
+                removal_indices.update({index:index})
 
         # Remove all marked pairs in a single operation
-        self.pairs = [pair for i, pair in enumerate(self.pairs) if i not in removal_indices]
+        #self.pairs = [pair for i, pair in enumerate(self.pairs) if i not in removal_indices]
         #self.tokenized_pairs= [pair for i, pair in enumerate(self.tokenized_pairs) if i not in removal_indices]
+        return removal_indices
     def remove_pairs_word(self,min_freq):
 
         low_freq_words = {word for word, count in self.word_count.items() if count <= min_freq}
 
-        for word in tqdm(low_freq_words):
-            self.remove_word(word)
+        removal_indices= dict()
+
+        self.tokenized_pairs =[(clear_punctuation(p1).split()+["<EOS>"],["<SOS>"]+clear_punctuation(p2).split()+["<EOS>"]) for p1,p2 in tqdm(self.pairs)]
+
+        for word in tqdm(low_freq_words,desc="remove min freq word"):
+            indices =self.remove_word(word)
+            removal_indices.update(indices)
+
+        #self.tokenized_pairs = [(clear_punctuation(p1).split() + ["<EOS>"], ["<SOS>"] + clear_punctuation(p2).split() + ["<EOS>"]) for p1, p2 in tqdm(self.pairs)]
+
+        self.pairs = [pair for i, pair in enumerate(self.pairs) if i not in removal_indices.values()]
+        self.tokenized_pairs = [(clear_punctuation(p1).split() + ["<EOS>"], ["<SOS>"] + clear_punctuation(p2).split() + ["<EOS>"]) for p1, p2 in tqdm(self.pairs)]
+
+        #self.tokenized_pairs= [pair for i, pair in enumerate(self.tokenized_pairs) if i not in removal_indices.values()]
 
 
 
@@ -214,18 +233,40 @@ def clear_punctuation(s):
 
 # Dataset class
 class Dataset(torch.utils.data.Dataset):
+
     def __init__(self, vocabulary, pairs):
         # TODO We want vocabulary and pairs to be attributes of the class
-        pass
+
+        self.data = []
+
+        for index in range(len(vocabulary.tokenized_pairs)):
+            self.data.append(vocabulary.tokenized_pair(index))
+
+
 
     def __len__(self):
         # TODO how many pairs do we have?
-        pass
+        return len(self.data)
+
 
     def __getitem__(self, ix):
         # TODO returns two tensors (question, answer) of the pair at index ix
         # TODO the tensors should be of type torch.tensor and should contain integers (word indices)
-        pass
+        x = self.data[ix][0]
+        y = self.data[ix][1]
+        return torch.tensor(x), torch.tensor(y)
+
+
+
+def collate_fn(batch, pad_value):
+  data, targets = zip(*batch)
+
+  padded_data = nn.utils.rnn.pad_sequence(data, batch_first=True,padding_value=pad_value)
+  padded_targets = nn.utils.rnn.pad_sequence(targets, batch_first=True,padding_value=pad_value)
+
+  return padded_data, padded_targets
+
+
 
 
 class PositionalEncoding(nn.Module):
@@ -402,15 +443,15 @@ def create_list_pairs(corpus:Corpus):
 
 
 
-def save_data(array):
+def save_data(array,name ='data.pkl'):
 
-    with open('data.pkl', 'wb') as f:
+    with open(name, 'wb') as f:
         pickle.dump(array, f)
     return 0
 
 
-def load_data():
-    with open('data.pkl', 'rb') as f:
+def load_data(name='data.pkl'):
+    with open(name, 'rb') as f:
         array = pickle.load(f)
     return array
 
@@ -418,7 +459,7 @@ def load_data():
 def plot_frequency(array,file_name):
     array.sort()
 
-    plt.hist(array[:40000])
+    plt.hist(array[29491:])
     plt.show()
     """
     print(array)
@@ -427,6 +468,15 @@ def plot_frequency(array,file_name):
     fig.savefig(fname=file_name)
     """
     return 0
+
+
+def sample_without_replacement(tensor, n):
+
+
+    indices = torch.randperm(tensor.numel())[:n]
+    sampled_elements = tensor.view(-1)[indices]
+
+    return sampled_elements
 
 
 if __name__ == "__main__":
@@ -456,20 +506,52 @@ if __name__ == "__main__":
 
     # Filter out the sentences that are too long
     vocab.plot_freqeuncy_pairs(file_name = "before_change.png")
+
     vocab.Remove_pairs(20)
+
     vocab.plot_freqeuncy_pairs(file_name = "after_change.png")
     print(len(vocab.pairs))
 
     save_data(vocab)
     # Filter out the words that are too rare
-    """
+
     #print(vocab.word_count.values())
     plot_frequency(list(vocab.word_count.values()), "word_count.png")
     print(len(vocab.pairs))
-    vocab.remove_pairs_word(5)
-    print(len(vocab.pairs))
-    save_data(vocab)
+    vocab.remove_pairs_word(50)
+    """
+    n= len(vocab.pairs)
+
     # SAVE and put the code above into a function that you will call if you need to generate something slightly different
+    save_data(vocab)
+    tensor = torch.arange(0, n)
+
+    sampled_tensor = sample_without_replacement(tensor, 10000)
+
+    new_pairs = [vocab.pairs[i] for i in sampled_tensor]
+
+    print(len(new_pairs))
+
+    vocab_data = Vocabulary(name="data", pairs=new_pairs)
+
+    vocab_data.tokenize()
+
+    print(vocab_data.tokenized_pairs)
+
+    save_data(vocab_data,"new_data.pkl")
+    print(vocab_data.tokenized_pair(3))
+    #data set
+
+    batch_size = 3
+    dataset = Dataset(vocab_data, vocab_data.pairs)
+    if batch_size == 1:
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    else:
+        dataloader = DataLoader(dataset, batch_size=batch_size,collate_fn=lambda b: collate_fn(b, vocab_data.word2index["<PAD>"]),shuffle=True)
+
+    for x,y in dataloader:
+        print(x,y)
+
 
     # Training loop (Consider writing a function for this/two separate functions for training and validation)
 
