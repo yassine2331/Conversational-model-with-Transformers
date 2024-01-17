@@ -8,6 +8,7 @@ Student: YASSINE OUESLATI
 ############################
 import torch
 import torch.nn as nn
+import numpy as np
 import math
 import regex as re
 import ast
@@ -18,7 +19,14 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pickle
+import time
+import torch.optim as optim
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from accelerate import Accelerator
+from accelerate.utils import GradientAccumulationPlugin
+import matplotlib.pyplot as plt
 ############################
 # Classes
 ############################
@@ -99,7 +107,7 @@ class Vocabulary:
 
         for word in s2:
             tokenized_answer.append(self.word2index[word])
-        tokenized_answer.append(self.word2index["<EOS>"])
+
 
         return tokenized_question,tokenized_answer
 
@@ -238,7 +246,7 @@ class Dataset(torch.utils.data.Dataset):
         # TODO We want vocabulary and pairs to be attributes of the class
 
         self.data = []
-
+        self.eos = vocabulary.word2index["<EOS>"]
         for index in range(len(vocabulary.tokenized_pairs)):
             self.data.append(vocabulary.tokenized_pair(index))
 
@@ -254,17 +262,18 @@ class Dataset(torch.utils.data.Dataset):
         # TODO the tensors should be of type torch.tensor and should contain integers (word indices)
         x = self.data[ix][0]
         y = self.data[ix][1]
-        return torch.tensor(x), torch.tensor(y)
+        z = y[1:]+[self.eos]
+        return torch.tensor(x), torch.tensor(y),torch.tensor(z)
 
 
 
 def collate_fn(batch, pad_value):
-  data, targets = zip(*batch)
+  data, targets,target2 = zip(*batch)
 
   padded_data = nn.utils.rnn.pad_sequence(data, batch_first=True,padding_value=pad_value)
   padded_targets = nn.utils.rnn.pad_sequence(targets, batch_first=True,padding_value=pad_value)
-
-  return padded_data, padded_targets
+  padded_targets2 = nn.utils.rnn.pad_sequence(target2, batch_first=True,padding_value=pad_value)
+  return padded_data, padded_targets,padded_targets2
 
 
 
@@ -300,13 +309,23 @@ class PositionalEncoding(nn.Module):
 
 
 class TransformerModel(nn.Module):
-    def __init__(self, vocab_size, d_model=512, pad_id=0, encoder_layers=6, decoder_layers=6, dim_feedforward=2048,
+    def __init__(self, vocab_size, d_model=512, pad_id=0, encoder_layers=6, decoder_layers=6, dim_feedforward=2048 ,
                  num_heads=8, dropout_p=0.1):
         super().__init__()
         # TODO add an embedding layer
+        self.embedding = nn.Embedding(vocab_size, d_model,padding_idx=pad_id)
         # TODO add a positional encoding layer
+        self.pos_encoder = PositionalEncoding(d_model, dropout_p)
         # TODO add a transformer layer, you can use nn.Transformer. You can use the default values for the parameters, but what about batch_first?
+        self.transformer = nn.Transformer(d_model=d_model,
+                                         nhead=num_heads,
+                                         num_encoder_layers=encoder_layers,
+                                         num_decoder_layers=decoder_layers,
+                                         dropout=dropout_p,
+                                          dim_feedforward=dim_feedforward,
+                                          batch_first=True)
         # TODO add a linear layer. Note: output should be probability distribution over the vocabulary
+        self.linear = nn.Linear(d_model,vocab_size)
 
         # Stuff you may need
         self.vocab_size = vocab_size
@@ -315,7 +334,8 @@ class TransformerModel(nn.Module):
 
     def create_padding_mask(self, x, pad_id=0):
         # TODO create a boolean mask for the <PAD> tokens
-        pass
+
+        return x == pad_id
 
     def forward(self, src, tgt):
         # S is the source sequence length, T is the target sequence length, N is the batch size, E is the feature number
@@ -338,10 +358,13 @@ class TransformerModel(nn.Module):
         memory_key_padding_mask = src_pad_mask  # (N, S)
 
         # Mask the future
-        tgt_mask = self.transformer.generate_square_subsequent_mask(tgt.size(1), dtype=torch.bool).to(
-            tgt.device)  # (T, T)
+        #tgt_mask = self.transformer.generate_square_subsequent_mask(tgt.size(1), dtype=torch.bool).to(tgt.device)  # (T, T)
+        tgt_mask = self.transformer.generate_square_subsequent_mask(tgt.size(1)).bool().to(tgt.device)  # (T, T)
+        #tgt_mask = tgt_mask
+
         # Expand to make it N * num_heads, T, T
-        tgt_mask = tgt_mask.unsqueeze(0).repeat(tgt.size(0) * self.num_heads, 1, 1)  # (N, T, T)
+        #tgt_mask = tgt_mask.unsqueeze(0).repeat(tgt.size(0) * self.num_heads, 1, 1)
+        # (N, T, T)
         # Transformer
         output = self.transformer(src, tgt, tgt_mask=tgt_mask, src_key_padding_mask=src_pad_mask,
                                   tgt_key_padding_mask=tgt_pad_mask,
@@ -351,9 +374,6 @@ class TransformerModel(nn.Module):
         return output
 
 
-############################
-# Methods
-############################
 
 
 
@@ -387,6 +407,338 @@ class Corpus:
     def get_pair(self,i):
         convo = self.get_convo(i)
         return [(convo[j],convo[j+1]) for j in range(len(convo)-1)]
+
+
+
+
+class TransformerSeparate(nn.Module):
+    def __init__(self, vocab_size, d_model=512, pad_id=0, encoder_layers=6, decoder_layers=6, dim_feedforward=2048, num_heads=8, dropout_p=0.1):
+        super().__init__()
+
+        self.vocab_size = vocab_size
+        self.pad_id = pad_id
+        self.d_model = d_model
+
+        # Embedding Layer
+        self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
+
+        # Positional Encoding Layer
+        self.pos_encoder = PositionalEncoding(d_model, dropout_p)
+
+        # Transformer Encoder Layer
+        encoder_layer = TransformerEncoderLayer(d_model=d_model, nhead=num_heads, dim_feedforward=dim_feedforward, dropout=dropout_p, batch_first=True)
+        self.transformer_encoder = TransformerEncoder(encoder_layer, num_layers=encoder_layers)
+
+        # Transformer Decoder Layer
+        decoder_layer = TransformerDecoderLayer(d_model=d_model, nhead=num_heads, dim_feedforward=dim_feedforward, dropout=dropout_p, batch_first=True)
+        self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers=decoder_layers)
+
+        # Linear Layer
+        self.linear = nn.Linear(d_model, vocab_size)
+        #hmm
+        self.vocab_size = vocab_size
+        self.pad_id = pad_id
+        self.num_heads = num_heads
+
+    def create_padding_mask(self, x):
+        return x == self.pad_id
+
+    def forward(self, src, tgt):
+        # S is the source sequence length, T is the target sequence length, N is the batch size, E is the feature number
+        # src: (N, S)
+        # tgt: (N, T)
+        # src_pad_mask: (N, S)
+        # tgt_pad_mask: (N, T)
+        # mask the future : (N * num_heads, T, T)
+        src_pad_mask = self.create_padding_mask(src)
+        tgt_pad_mask = self.create_padding_mask(tgt)
+
+        # Embedding and Positional Encoding
+        src = self.embedding(src)
+        tgt = self.embedding(tgt)
+
+        src = self.pos_encoder(src)
+        tgt = self.pos_encoder(tgt)
+
+        # Memory Key Padding Mask
+        memory_key_padding_mask = src_pad_mask
+
+
+        # Transformer Encoder
+        memory = self.transformer_encoder(src, src_key_padding_mask=src_pad_mask)
+
+        # Transformer Decoder
+        output = self.transformer_decoder(tgt, memory, tgt_key_padding_mask=tgt_pad_mask,memory_key_padding_mask=memory_key_padding_mask)
+
+        # Linear Layer
+        output = self.linear(output)
+
+        return output
+
+
+
+
+
+############################
+# Training
+############################
+
+
+def train(model,train_data,criterion,optimizer,scheduler,epoch,vocabulary,DEVICE):
+
+    num_batches = len(train_data)
+
+
+    model.train()  # turn on train mode
+
+    total_loss = 0.
+    log_interval = 150
+
+
+    start_time = time.time()
+
+    batch =0
+    final_loss=0
+
+    for x , t1, t2 in train_data:
+
+
+        x = x.to(DEVICE)
+        t1 = t1.to(DEVICE)
+        t2  = t2.to(DEVICE)
+        tt= t2
+        output = model(x,t1)
+
+        output= output.to(DEVICE)
+
+        output_flat = output.view(-1,model.vocab_size)
+        t2 = t2.view(-1)
+        loss = criterion(output_flat, t2)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.9)
+        optimizer.step()
+
+        total_loss += loss.item()
+        final_loss += loss.item()
+
+        if batch % log_interval == 0 and batch > 0:
+            lr = scheduler.get_last_lr()[0]
+            ms_per_batch = (time.time() - start_time) * 1000 / log_interval
+            cur_loss = total_loss / log_interval
+            ppl = math.exp(cur_loss)
+            print(f'| epoch {epoch:3d} | {batch:5d}/{num_batches:5d} batches | '
+                  f'lr {lr:04.4f} | ms/batch {ms_per_batch:5.2f} | '
+                  f'loss {cur_loss:5.2f} | ppl {ppl:8.2f}')
+            total_loss = 0
+            start_time = time.time()
+
+            print("| Question: ", [vocabulary.index2word[idx.item()] for idx in x[0] ])
+            # Print the words of the answers
+            print("| Answer t2: ", [vocabulary.index2word[idx.item()] for idx in tt[0]])
+            #print predinction 2 ??
+
+            print("| Answer t1: ", [vocabulary.index2word[idx.item()] for idx in t1[0] ])
+            # Print the words of the prediction
+            print("| Prediction: ", [vocabulary.index2word[idx.item()] for idx in torch.argmax(output[0], dim=-1)])
+
+
+
+        batch = batch + 1
+
+    print(final_loss/num_batches)
+    return final_loss/num_batches
+
+
+
+
+
+
+def train_ga(model,train_data,criterion,optimizer,scheduler,epoch,vocabulary,DEVICE):
+
+    num_batches = len(train_data)
+
+
+    model.train()  # turn on train mode
+
+    total_loss = 0.
+    log_interval = 5000
+
+    accum_iter = 32
+
+    start_time = time.time()
+
+    batch =0
+    final_loss=0
+
+    for x , t1, t2 in train_data:
+
+
+        x = x.to(DEVICE)
+        t1 = t1.to(DEVICE)
+        t2  = t2.to(DEVICE)
+        tt= t2
+        output = model(x,t1)
+
+        output= output.to(DEVICE)
+
+        output_flat = output.view(-1,model.vocab_size)
+        t2 = t2.view(-1)
+        loss = criterion(output_flat, t2)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.9)
+
+
+
+
+        total_loss += loss.item()
+        final_loss += loss.item()
+
+
+        loss = loss / accum_iter
+        loss.backward()
+        # weights update only every accum_iter step
+        if ((batch + 1) % accum_iter == 0) or (batch + 1 == num_batches):
+            optimizer.step()
+            optimizer.zero_grad()
+
+
+
+        if batch % log_interval == 0 and batch > 0:
+            lr = scheduler.get_last_lr()[0]
+            ms_per_batch = (time.time() - start_time) * 1000 / log_interval
+            cur_loss = total_loss / log_interval
+            ppl = math.exp(cur_loss)
+            print(f'| epoch {epoch:3d} | {batch:5d}/{num_batches:5d} batches | '
+                  f'lr {lr:04.4f} | ms/batch {ms_per_batch:5.2f} | '
+                  f'loss {cur_loss:5.2f} | ppl {ppl:8.2f}')
+            total_loss = 0
+            start_time = time.time()
+
+            print("| Question: ", [vocabulary.index2word[idx.item()] for idx in x[0] if idx.item()!=0])
+            # Print the words of the answers
+            print("| Answer t2: ", [vocabulary.index2word[idx.item()] for idx in tt[0]if idx.item()!=0])
+            #print predinction 2 ??
+
+            print("| Answer t1: ", [vocabulary.index2word[idx.item()] for idx in t1[0]if idx.item()!=0])
+            # Print the words of the prediction
+            print("| Prediction: ", [vocabulary.index2word[idx.item()] for idx in torch.argmax(output[0], dim=-1)])
+
+
+
+        batch = batch + 1
+
+    print(final_loss/num_batches)
+    return final_loss/num_batches
+
+
+
+
+
+
+
+def train_ga_hf(model,train_data,criterion,optimizer,scheduler,epoch,vocabulary,accelerator,DEVICE):
+
+    num_batches = len(train_data)
+
+
+    model.train()  # turn on train mode
+
+    total_loss = 0.
+    log_interval = 1000
+
+    accum_iter = 32
+
+    start_time = time.time()
+
+    batch =0
+    final_loss=0
+
+    for x , t1, t2 in train_data:
+        with accelerator.accumulate(model):
+            tt = t2
+            output = model(x,t1)
+            output= output.to(DEVICE)
+
+            output_flat = output.view(-1,model.vocab_size)
+            t2 = t2.view(-1)
+
+            loss = criterion(output_flat, t2)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.9)
+
+
+            total_loss += loss.item()
+            final_loss += loss.item()
+
+            accelerator.backward(loss)
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+
+
+        if batch % log_interval == 0 and batch > 0:
+            lr = scheduler.get_last_lr()[0]
+            ms_per_batch = (time.time() - start_time) * 1000 / log_interval
+            cur_loss = total_loss / log_interval
+            ppl = math.exp(cur_loss)
+            print(f'| epoch {epoch:3d} | {batch:5d}/{num_batches:5d} batches | '
+                  f'lr {lr:04.4f} | ms/batch {ms_per_batch:5.2f} | '
+                  f'loss {cur_loss:5.2f} | ppl {ppl:8.2f}')
+            total_loss = 0
+            start_time = time.time()
+
+            print("| Question: ", [vocabulary.index2word[idx.item()] for idx in x[0] if idx.item()!=0])
+            # Print the words of the answers
+            print("| Answer t2: ", [vocabulary.index2word[idx.item()] for idx in tt[0]if idx.item()!=0])
+            #print predinction 2 ??
+
+            print("| Answer t1: ", [vocabulary.index2word[idx.item()] for idx in t1[0]if idx.item()!=0])
+            # Print the words of the prediction
+            print("| Prediction: ", [vocabulary.index2word[idx.item()] for idx in torch.argmax(output[0], dim=-1)])
+
+
+
+        batch = batch + 1
+
+    print(final_loss/num_batches)
+    return final_loss/num_batches
+
+
+
+
+
+
+def evaluate(model,eval_data,criterion,DEVICE):
+    model.eval()  # turn on evaluation mode
+    total_loss = 0.
+    with torch.no_grad():
+        for x , t1, t2 in eval_data:
+
+            x = x.to(DEVICE)
+            t1 = t1.to(DEVICE)
+            t2  = t2.to(DEVICE)
+            output = model(x,t1)
+            output= output.to(DEVICE)
+            output_flat = output.view(-1,model.vocab_size)
+            t2 = t2.view(-1)
+            total_loss +=  criterion(output_flat, t2).item()
+
+    print("evaluate loss = ",total_loss / (len(eval_data) - 1))
+    return total_loss / (len(eval_data) - 1)
+
+
+
+
+############################
+# Training
+############################
+
+
+############################
+# Methods
+############################
+
 
 def inspect_files():
 
@@ -479,11 +831,113 @@ def sample_without_replacement(tensor, n):
     return sampled_elements
 
 
-if __name__ == "__main__":
-    # !!! Don't change the seed !!!
-    torch.manual_seed(42)
-    # !!!!!!
 
+
+
+def generate_output(model, input_sentence, vocabulary, max_length=50):
+
+    model.eval()  # Set the model to evaluation mode
+
+    # Tokenize the input sentence
+    tokenized_input = vocabulary.tokenize_sentence(input_sentence)
+
+    # Convert to tensor and add batch dimension
+    input_tensor = torch.tensor([tokenized_input]).to(DEVICE)
+
+    # Prepare the initial target tensor with <SOS>
+    sos_token_id = vocabulary.word2index["<SOS>"]
+    target_tensor = torch.tensor([[sos_token_id]]).to(DEVICE)
+
+    # Generate the output sequence
+    for _ in range(max_length):
+        with torch.no_grad():
+            output = model(input_tensor, target_tensor)
+            next_token_id = output[0, -1, :].argmax().item()
+
+        # Append the predicted token id to the target sequence
+        target_tensor = torch.cat([target_tensor, torch.tensor([[next_token_id]]).to(DEVICE)], dim=-1)
+
+        # Break if <EOS> token is generated
+        if next_token_id == vocabulary.word2index["<EOS>"]:
+            break
+
+    # Convert the output tokens to words
+    output_sequence = [vocabulary.index2word[token_id] for token_id in target_tensor[0].cpu().numpy()]
+
+    # Join the words to form the output sentence
+    output_sentence = ' '.join(output_sequence[1:])  # Skip the <SOS> token
+
+    return output_sentence
+
+
+
+
+
+
+
+
+def generate_output_top_k(model, input_sentence, vocabulary, max_length=50, top_k=30):
+
+    model.eval()  # Set the model to evaluation mode
+
+    # Tokenize the input sentence
+    tokenized_input = vocabulary.tokenize_sentence(input_sentence)
+
+    # Convert to tensor and add batch dimension
+    input_tensor = torch.tensor([tokenized_input]).to(DEVICE)
+
+    # Prepare the initial target tensor with <SOS>
+    sos_token_id = vocabulary.word2index["<SOS>"]
+    target_tensor = torch.tensor([[sos_token_id]]).to(DEVICE)
+
+    # Generate the output sequence
+    for _ in range(max_length):
+        with torch.no_grad():
+            output = model(input_tensor, target_tensor)
+
+
+
+            # Get the top k tokens and their probabilities
+            top_k_probs, top_k_indices = torch.topk(output[0, -1, :], top_k,dim=-1, sorted=True)
+
+            top_k_probs = torch.softmax(top_k_probs,dim=-1)
+
+            # Sample from the top k tokens
+
+            next_token_id = np.random.choice(top_k_indices.cpu().numpy(), p=top_k_probs.cpu().numpy())
+
+        target_tensor = torch.cat([target_tensor, torch.tensor([[next_token_id]]).to(DEVICE)], dim=-1)
+
+        # Break if <EOS> token is generated
+        if next_token_id == vocabulary.word2index["<EOS>"]:
+            break
+
+    # Convert the output tokens to words
+    output_sequence = [vocabulary.index2word[token_id] for token_id in target_tensor[0].cpu().numpy()]
+
+    # Join the words to form the output sentence
+    output_sentence = ' '.join(output_sequence[1:])  # Skip the <SOS> token
+
+    return output_sentence
+
+
+
+def plot_losses(train_loss, eval_loss, title='Training and Evaluation Loss', xlabel='Epochs', ylabel='Loss'):
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_loss, marker='o', linestyle='-', color='blue', label='Training Loss')
+    plt.plot(eval_loss, marker='s', linestyle='-', color='red', label='Evaluation Loss')
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    plt.savefig('my_plot.png')
+
+
+
+def prepare_data():
     # Download the data
     corpus = Corpus()
     corpus = inspect_files()
@@ -494,7 +948,7 @@ if __name__ == "__main__":
 
     # Tokenize the data
     vocab = load_data()
-    """
+
     vocab.tokenize()   # For now
 
     print(vocab.pair(0))
@@ -518,11 +972,28 @@ if __name__ == "__main__":
     #print(vocab.word_count.values())
     plot_frequency(list(vocab.word_count.values()), "word_count.png")
     print(len(vocab.pairs))
+
     vocab.remove_pairs_word(50)
-    """
-    n= len(vocab.pairs)
+
+
 
     # SAVE and put the code above into a function that you will call if you need to generate something slightly different
+
+
+    return vocab
+
+
+
+
+
+if __name__ == "__main__":
+    # !!! Don't change the seed !!!
+    torch.manual_seed(42)
+    # !!!!!!
+
+    vocab = prepare_data()
+
+    n= len(vocab.pairs)
     save_data(vocab)
     tensor = torch.arange(0, n)
 
@@ -542,20 +1013,96 @@ if __name__ == "__main__":
     print(vocab_data.tokenized_pair(3))
     #data set
 
-    batch_size = 3
+    vocab_data = vocab
+
+
+    batch_size = 64
     dataset = Dataset(vocab_data, vocab_data.pairs)
+
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [16000, 4000])
+
+
+    print(len(vocab_data.pairs))
+
     if batch_size == 1:
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
     else:
-        dataloader = DataLoader(dataset, batch_size=batch_size,collate_fn=lambda b: collate_fn(b, vocab_data.word2index["<PAD>"]),shuffle=True)
-
-    for x,y in dataloader:
-        print(x,y)
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, vocab_data.word2index["<PAD>"]), shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, vocab_data.word2index["<PAD>"]), shuffle=True)
 
 
+
+    DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
+    print("DEVICE: ", DEVICE)
+
+
+
+    lr = 0.0001
+
+    model = TransformerSeparate(vocab_size=len(vocab_data.word2index),dropout_p=0.3)
+
+
+    model = model.to(DEVICE)
+
+
+
+    criterion = nn.CrossEntropyLoss(ignore_index=vocab_data.word2index["<PAD>"])
+
+    optimizer = optim.Adam(model.parameters(), lr=lr,weight_decay=1e-3)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, gamma=0.9,step_size=3)
+
+
+    traing_losses = []
+
+    eval_losses = []
+
+    for epoch in range(1,7):
+        training_loss = train(model, train_dataloader, criterion,optimizer,scheduler, epoch,vocab_data, DEVICE)
+        scheduler.step()
+        eval_loss = evaluate(model,val_dataloader,criterion,DEVICE)
+
+        traing_losses.append(training_loss)
+        eval_losses.append(eval_loss)
+
+        plot_losses(traing_losses, eval_losses)
+
+
+
+
+
+
+    accelerator = Accelerator(gradient_accumulation_steps=32)
+
+    lr = 0.0001
+
+    model = TransformerModel(vocab_size=len(vocab_data.word2index),dropout_p=0.3)
+
+    criterion = nn.CrossEntropyLoss(ignore_index=vocab_data.word2index["<PAD>"])
+
+    optimizer = optim.Adam(model.parameters(), lr=lr,weight_decay=1e-3)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, gamma=0.9,step_size=5)
+
+    input_sentence ="hi there"
+
+
+
+    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, train_dataloader, scheduler)
+    for epoch in range(10):
+        train_ga_hf(model, dataloader, criterion,optimizer,scheduler, epoch,vocab_data,accelerator, DEVICE)
+        scheduler.step()
+        evaluate(model,val_dataloader,criterion,DEVICE)
+
+
+
+    while True:
+        input_sentence = input("say something: ")
+        print("greedy: ",generate_output(model, input_sentence, vocab_data, max_length=50))
+        print("topk: ",generate_output_top_k(model, input_sentence, vocab_data, max_length=50, top_k=10))
     # Training loop (Consider writing a function for this/two separate functions for training and validation)
 
     # Evaluation by feeding the model with one input sentence at a time
 
     pass
+
 
